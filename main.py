@@ -32,6 +32,10 @@ def download_file(url: str, path: str):
         with open(path, "wb") as f:
             f.write(resp.content)
 
+@app.route('/')
+def index():
+    return jsonify({"Choo Choo": "Welcome to your Flask app 🚅"})
+
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
     data = request.get_json()
