@@ -92,7 +92,7 @@ def generate_video():
         return send_file(output_path, mimetype="video/mp4", as_attachment=True, attachment_filename="output.mp4")
 
     except Exception as e:
-        logger.exception("Error generating video")
+        logger.exception("Error generating video ")
         cleanup_files(image_path, audio_path, bgm_path, srt_path, output_path)
         return jsonify({"error": str(e)}), 500
 
