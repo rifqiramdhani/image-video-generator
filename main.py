@@ -5,11 +5,11 @@ import logging
 import requests
 import gdown
 import openai
-import subprocess
-from typing import List
 from flask import Flask, request, send_file, jsonify
 from dotenv import load_dotenv
-import textwrap
+import re
+from datetime import timedelta
+import subprocess
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -17,6 +17,19 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
+
+def parse_srt_timings(srt_path):
+    pattern = r"(\d{2}):(\d{2}):(\d{2}),\d{3} --> (\d{2}):(\d{2}):(\d{2}),\d{3}"
+    timings = []
+    with open(srt_path) as f:
+        for line in f:
+            m = re.match(pattern, line)
+            if m:
+                h1,m1,s1,h2,m2,s2 = map(int, m.groups())
+                start = timedelta(hours=h1, minutes=m1, seconds=s1).total_seconds()
+                end   = timedelta(hours=h2, minutes=m2, seconds=s2).total_seconds()
+                timings.append(end - start)
+    return timings
 
 def cleanup_files(*paths):
     for p in paths:
@@ -37,152 +50,104 @@ def download_file(url: str, path: str):
         with open(path, "wb") as f:
             f.write(resp.content)
 
-def get_audio_duration(path: str) -> float:
-    # Call ffprobe to get duration in seconds
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        path
-    ]
-    out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
-    return float(out.strip())
-
 @app.route('/')
 def index():
     return jsonify({"Choo Choo": "Welcome to your Flask app 🚅"})
 
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
-    data = request.get_json() or {}
-    images: List[str] = data.get("image_urls") or []
-    audio_url = data.get("audio_url")
-    bgm_url   = data.get("bgm_url")
-    transcript = data.get("transcript", "").strip()
+    data = request.get_json()
 
-    # validasi
-    if not images or not audio_url or not bgm_url or not transcript:
-        return jsonify({"error": "Harus menyediakan image_urls, audio_url, bgm_url, dan transcript"}), 400
+    if not data:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
 
-    # download semua file
-    image_paths = []
-    for url in images:
-        ext = os.path.splitext(url)[1] or ".jpg"
-        path = f"/tmp/{uuid.uuid4().hex}{ext}"
-        download_file(url, path)
-        image_paths.append(path)
+    image_urls = data.get("image_urls")  # list
+    audio_url = data["audio_url"]
+    bgm_url   = data["bgm_url"]
 
+    if not image_urls or not audio_url or not bgm_url:
+        return jsonify({"error": "Missing one of image_urls, audio_url, or bgm_url"}), 400
+
+    image_path  = f"/tmp/{uuid.uuid4().hex}.png"
     audio_path  = f"/tmp/{uuid.uuid4().hex}.mp3"
     bgm_path    = f"/tmp/{uuid.uuid4().hex}.mp3"
     srt_path    = f"/tmp/{uuid.uuid4().hex}.srt"
     output_path = f"/tmp/{uuid.uuid4().hex}.mp4"
-    download_file(audio_url, audio_path)
-    download_file(bgm_url, bgm_path)
 
     try:
-        # 1. hitung total durasi audio
-        total_dur = get_audio_duration(audio_path)
+        # 1. Download files
+        image_paths = [f"/tmp/{uuid.uuid4().hex}.png" for _ in image_urls]
+        for url, path in zip(image_urls, image_paths):
+            download_file(url, path)
+        download_file(audio_url, audio_path := f"/tmp/{uuid.uuid4().hex}.mp3")
+        download_file(bgm_url,   bgm_path   := f"/tmp/{uuid.uuid4().hex}.mp3")
 
-        # 2. split transcript jadi paragraf
-        paras = [p.strip() for p in transcript.split("\n\n") if p.strip()]
-        # 3. hitung durasi tiap paragraf proporsional
-        lengths = [len(p) for p in paras]
-        total_chars = sum(lengths)
-        times = [ total_dur * (l/total_chars) for l in lengths ]
+        # 2. Transkripsi → SRT
+        transcript = openai.Audio.transcribe("whisper-1", open(audio_path,"rb"), response_format="srt")
+        with open(srt_path := f"/tmp/{uuid.uuid4().hex}.srt", "w") as sf:
+            sf.write(transcript)
 
-        # 4. buat file SRT
-        def fmt_time(sec):
-            hrs = int(sec//3600)
-            mins = int((sec%3600)//60)
-            secs = int(sec%60)
-            ms = int((sec - int(sec))*1000)
-            return f"{hrs:02d}:{mins:02d}:{secs:02d},{ms:03d}"
-
-        with open(srt_path, "w") as sf:
-            cursor = 0.0
-            idx = 1
-            for p, dur in zip(paras, times):
-                # wrap ke maksimal 40 karakter per baris (garis panjang bisa disesuaikan)
-                lines = textwrap.wrap(p, width=40)
-                # bikin entry berisi 2 baris per blok
-                for i in range(0, len(lines), 2):
-                    chunk = lines[i:i+2]
-                    start = cursor
-                    # durasi tiap blok proporsional: total durasi paragraf dibagi jumlah blok
-                    block_dur = dur * (len(chunk) / len(lines))
-                    end = start + block_dur
-
-                    # format waktu
-                    def fmt_time(sec):
-                        hrs = int(sec//3600)
-                        mins = int((sec%3600)//60)
-                        secs = int(sec%60)
-                        ms = int((sec - int(sec))*1000)
-                        return f"{hrs:02d}:{mins:02d}:{secs:02d},{ms:03d}"
-
-                    sf.write(f"{idx}\n")
-                    sf.write(f"{fmt_time(start)} --> {fmt_time(end)}\n")
-                    sf.write("\n".join(chunk) + "\n\n")
-
-                    cursor = end
-                    idx += 1
-
-        # 5. build ffmpeg inputs & filter_complex dinamis
-        per_times = times
-        num_imgs  = len(image_paths)
-        audio_idx = num_imgs
-        bgm_idx   = num_imgs + 1
-
-        # inputs
-        inputs = ""
-        for idx, (img, t) in enumerate(zip(image_paths, per_times)):
-            inputs += f"-loop 1 -t {t:.3f} -i '{img}' "
-        inputs += f"-i '{audio_path}' -i '{bgm_path}' "
-
-        # video filters
-        filters = [
-            f"[{i}:v]scale=1920:1920:force_original_aspect_ratio=decrease,"
-            f"crop=1920:1080,setsar=1[v{i}]"
-            for i in range(num_imgs)
-        ]
-        concat_lbl = "".join(f"[v{i}]" for i in range(num_imgs))
-        filters.append(f"{concat_lbl}concat=n={num_imgs}:v=1:a=0,subtitles='{srt_path}'[vout]")
-        # audio mix
-        filters.append(
-            f"[{bgm_idx}:a]volume=0.4[bgm];"
-            f"[{audio_idx}:a][bgm]amix=inputs=2:duration=first[aout]"
+        # 3. Parse durasi tiap segmen subtitle
+        # timings = parse_srt_timings(srt_path)
+        # Jika jumlah gambar < segmen, bisa: cycle gambar atau pakai durasi rata
+        out = subprocess.check_output(
+        ["ffprobe","-v","error","-show_entries","format=duration",
+        "-of","default=noprint_wrappers=1:nokey=1", audio_path]
         )
+        total_audio = float(out)
+        # bagi rata
+        dur_per_image = total_audio / len(image_paths)
+        timings = [dur_per_image]*len(image_paths)
 
-        filter_complex = ";".join(filters)
+        # 4. Buat video segmen
+        segment_paths = []
+        for idx, (img, dur) in enumerate(zip(image_paths, timings)):
+            seg = f"/tmp/seg_{idx}.mp4"
+            cmd = (
+                f"ffmpeg -y -loop 1 -i '{img}' -t {dur:.3f} "
+                f"-vf \"scale=1920:1920:force_original_aspect_ratio=decrease,crop=1920:1080\" "
+                f"-c:v libx264 -pix_fmt yuv420p '{seg}'"
+            )
+            os.system(cmd)
+            segment_paths.append(seg)
 
-        # 6. build & run ffmpeg
+        # 5. Concat segmen
+        concat_list = f"/tmp/{uuid.uuid4().hex}_list.txt"
+        with open(concat_list, "w") as f:
+            for seg in segment_paths:
+                f.write(f"file '{seg}'\n")
+        slideshow = f"/tmp/{uuid.uuid4().hex}_slideshow.mp4"
+        os.system(f"ffmpeg -y -f concat -safe 0 -i '{concat_list}' -c copy '{slideshow}'")
+
+        # 6. Gabung semua
         cmd = (
-            f"ffmpeg -y {inputs}"
-            f"-filter_complex \"{filter_complex}\" "
-            f"-map \"[vout]\" -map \"[aout]\" "
+            f"ffmpeg -y -i '{slideshow}' -i '{audio_path}' -i '{bgm_path}' "
+            f"-filter_complex \"[2:a]volume=0.4[bgm];"
+            f"[1:a][bgm]amix=inputs=2:duration=longest[aout];"
+            f"[0:v]subtitles='{srt_path}'[vout]\" "
+            f"-map '[vout]' -map '[aout]' "
             f"-c:v libx264 -pix_fmt yuv420p "
-            f"-c:a aac -b:a 192k -shortest '{output_path}'"
+            f"-c:a aac -b:a 192k "
+            f"-t '{total_audio}' '{output_path}'"
         )
-        logger.info("Running ffmpeg:\n%s", cmd)
+        logger.info("Running ffmpeg command")
         if os.system(cmd) != 0:
-            raise RuntimeError("ffmpeg failed")
+            raise RuntimeError("ffmpeg failed to")
 
-        # cleanup
-        threading.Timer(60, cleanup_files,
-                        args=tuple(image_paths) + (audio_path, bgm_path, srt_path, output_path)
-                       ).start()
+        # schedule cleanup in 60s
+        threading.Timer(60, cleanup_files, args=[image_path, audio_path, bgm_path, srt_path, output_path]).start()
 
-        return send_file(output_path, mimetype="video/mp4",
-                         as_attachment=True, attachment_filename="output.mp4")
+        return send_file(output_path, mimetype="video/mp4", as_attachment=True, attachment_filename="output.mp4")
 
     except Exception as e:
-        logger.exception("Error generating video")
-        cleanup_files(*(image_paths + [audio_path, bgm_path, srt_path, output_path]))
+        logger.exception("Error generating video ")
+        cleanup_files(image_path, audio_path, bgm_path, srt_path, output_path)
         return jsonify({"error": str(e)}), 500
 
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0",
-            port=int(os.getenv("PORT", 8888)),
-            debug=True, use_reloader=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8888)),
+        debug=True,
+        use_reloader=True
+    )
