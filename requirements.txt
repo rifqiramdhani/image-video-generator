@@ -11,3 +11,4 @@ pydantic
 requests
 gdown
 openai==0.28
+python-dotenv
