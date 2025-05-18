@@ -122,7 +122,7 @@ def generate_video():
         # 6. Gabung semua
         cmd = (
             f"ffmpeg -y -i '{slideshow}' -i '{audio_path}' -i '{bgm_path}' "
-            f"-filter_complex \"[2:a]volume=0.4[bgm];"
+            f"-filter_complex \"[2:a]volume=0.6[bgm];"
             f"[1:a][bgm]amix=inputs=2:duration=longest[aout];"
             f"[0:v]subtitles='{srt_path}'[vout]\" "
             f"-map '[vout]' -map '[aout]' "
