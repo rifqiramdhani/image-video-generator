@@ -9,6 +9,7 @@ import subprocess
 from typing import List
 from flask import Flask, request, send_file, jsonify
 from dotenv import load_dotenv
+import textwrap
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -58,14 +59,17 @@ def generate_video():
     images: List[str] = data.get("image_urls") or []
     audio_url = data.get("audio_url")
     bgm_url   = data.get("bgm_url")
+    transcript = data.get("transcript", "").strip()
 
-    if not images or not audio_url or not bgm_url:
-        return jsonify({"error": "Must provide image_urls (list), audio_url, and bgm_url"}), 400
+    # validasi
+    if not images or not audio_url or not bgm_url or not transcript:
+        return jsonify({"error": "Harus menyediakan image_urls, audio_url, bgm_url, dan transcript"}), 400
 
-    # prepare temp paths
+    # download semua file
     image_paths = []
     for url in images:
-        path = f"/tmp/{uuid.uuid4().hex}{os.path.splitext(url)[1] or '.jpg'}"
+        ext = os.path.splitext(url)[1] or ".jpg"
+        path = f"/tmp/{uuid.uuid4().hex}{ext}"
         download_file(url, path)
         image_paths.append(path)
 
@@ -73,43 +77,86 @@ def generate_video():
     bgm_path    = f"/tmp/{uuid.uuid4().hex}.mp3"
     srt_path    = f"/tmp/{uuid.uuid4().hex}.srt"
     output_path = f"/tmp/{uuid.uuid4().hex}.mp4"
+    download_file(audio_url, audio_path)
+    download_file(bgm_url, bgm_path)
 
     try:
-        download_file(audio_url, audio_path)
-        download_file(bgm_url, bgm_path)
-
-        # Whisper → SRT
-        with open(audio_path, "rb") as af:
-            transcript = openai.audio.transcribe(
-                model="whisper-1",
-                file=af,
-                response_format="srt"
-            )
-        with open(srt_path, "w") as sf:
-            sf.write(transcript)
-
-        # figure out total audio duration
+        # 1. hitung total durasi audio
         total_dur = get_audio_duration(audio_path)
-        per_image = total_dur / len(image_paths)
 
-        # build ffmpeg inputs and filters
+        # 2. split transcript jadi paragraf
+        paras = [p.strip() for p in transcript.split("\n\n") if p.strip()]
+        # 3. hitung durasi tiap paragraf proporsional
+        lengths = [len(p) for p in paras]
+        total_chars = sum(lengths)
+        times = [ total_dur * (l/total_chars) for l in lengths ]
+
+        # 4. buat file SRT
+        def fmt_time(sec):
+            hrs = int(sec//3600)
+            mins = int((sec%3600)//60)
+            secs = int(sec%60)
+            ms = int((sec - int(sec))*1000)
+            return f"{hrs:02d}:{mins:02d}:{secs:02d},{ms:03d}"
+
+        with open(srt_path, "w") as sf:
+            cursor = 0.0
+            idx = 1
+            for p, dur in zip(paras, times):
+                # wrap ke maksimal 40 karakter per baris (garis panjang bisa disesuaikan)
+                lines = textwrap.wrap(p, width=40)
+                # bikin entry berisi 2 baris per blok
+                for i in range(0, len(lines), 2):
+                    chunk = lines[i:i+2]
+                    start = cursor
+                    # durasi tiap blok proporsional: total durasi paragraf dibagi jumlah blok
+                    block_dur = dur * (len(chunk) / len(lines))
+                    end = start + block_dur
+
+                    # format waktu
+                    def fmt_time(sec):
+                        hrs = int(sec//3600)
+                        mins = int((sec%3600)//60)
+                        secs = int(sec%60)
+                        ms = int((sec - int(sec))*1000)
+                        return f"{hrs:02d}:{mins:02d}:{secs:02d},{ms:03d}"
+
+                    sf.write(f"{idx}\n")
+                    sf.write(f"{fmt_time(start)} --> {fmt_time(end)}\n")
+                    sf.write("\n".join(chunk) + "\n\n")
+
+                    cursor = end
+                    idx += 1
+
+        # 5. build ffmpeg inputs & filter_complex dinamis
+        per_times = times
+        num_imgs  = len(image_paths)
+        audio_idx = num_imgs
+        bgm_idx   = num_imgs + 1
+
+        # inputs
         inputs = ""
-        filters = []
-        for idx, img in enumerate(image_paths):
-            inputs += f"-loop 1 -t {per_image:.3f} -i '{img}' "
-            filters.append(f"[{idx}:v]scale=1920:1920:force_original_aspect_ratio=decrease,"
-                           f"crop=1920:1080,setsar=1[v{idx}]")
-
-        # concat filter for all image streams
-        concat_inputs = "".join(f"[v{idx}]" for idx in range(len(image_paths)))
-        filters.append(f"{concat_inputs}concat=n={len(image_paths)}:v=1:a=0,subtitles='{srt_path}'[vout]")
-
-        # background music volume + mix
+        for idx, (img, t) in enumerate(zip(image_paths, per_times)):
+            inputs += f"-loop 1 -t {t:.3f} -i '{img}' "
         inputs += f"-i '{audio_path}' -i '{bgm_path}' "
-        filters.append("[3:a]volume=0.4[bgm];[2:a][bgm]amix=inputs=2:duration=first[aout]")
+
+        # video filters
+        filters = [
+            f"[{i}:v]scale=1920:1920:force_original_aspect_ratio=decrease,"
+            f"crop=1920:1080,setsar=1[v{i}]"
+            for i in range(num_imgs)
+        ]
+        concat_lbl = "".join(f"[v{i}]" for i in range(num_imgs))
+        filters.append(f"{concat_lbl}concat=n={num_imgs}:v=1:a=0,subtitles='{srt_path}'[vout]")
+        # audio mix
+        filters.append(
+            f"[{bgm_idx}:a]volume=0.4[bgm];"
+            f"[{audio_idx}:a][bgm]amix=inputs=2:duration=first[aout]"
+        )
 
         filter_complex = ";".join(filters)
 
+        # 6. build & run ffmpeg
         cmd = (
             f"ffmpeg -y {inputs}"
             f"-filter_complex \"{filter_complex}\" "
@@ -117,12 +164,11 @@ def generate_video():
             f"-c:v libx264 -pix_fmt yuv420p "
             f"-c:a aac -b:a 192k -shortest '{output_path}'"
         )
-
         logger.info("Running ffmpeg:\n%s", cmd)
         if os.system(cmd) != 0:
             raise RuntimeError("ffmpeg failed")
 
-        # cleanup later
+        # cleanup
         threading.Timer(60, cleanup_files,
                         args=tuple(image_paths) + (audio_path, bgm_path, srt_path, output_path)
                        ).start()
@@ -134,6 +180,7 @@ def generate_video():
         logger.exception("Error generating video")
         cleanup_files(*(image_paths + [audio_path, bgm_path, srt_path, output_path]))
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0",
