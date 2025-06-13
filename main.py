@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 import re
 from datetime import timedelta
 import subprocess
+from PIL import Image
+from PIL.ExifTags import TAGS
+from io import BytesIO
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -148,28 +151,47 @@ def generate_video():
 @app.route("/extract-metadata-image", methods=["GET"])
 def extract_metadata_image():
     image_url = request.args.get("image_url")
+    
     if not image_url:
         return jsonify({"error": "Missing image_url parameter"}), 400
 
     try:
+        # Download the image
         response = requests.get(image_url, timeout=30)
-        response.raise_for_status()
-        with open("/tmp/temp_image.jpg", "wb") as f:
-            f.write(response.content)
+        response.raise_for_status()  # Raise an exception for 4xx/5xx errors
 
-        cmd = ["exiftool", "-j", "/tmp/temp_image.jpg"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError("exiftool failed")
+        # Open the image using PIL (Pillow)
+        img = Image.open(BytesIO(response.content))
 
-        metadata = result.stdout
-        cleanup_files("/tmp/temp_image.jpg")
-        return jsonify({"metadata": metadata})
+        # Get basic metadata
+        image_metadata = {
+            "format": img.format,  # Image format (JPEG, PNG, etc.)
+            "mode": img.mode,      # Color space (RGB, L, etc.)
+            "size": img.size       # Image size (width, height)
+        }
 
+        # Extract EXIF data if available
+        exif_data = img._getexif()
+        exif_metadata = {}
+
+        if exif_data:
+            for tag, value in exif_data.items():
+                tag_name = TAGS.get(tag, tag)
+                exif_metadata[tag_name] = value
+        
+        # Combine basic metadata and EXIF data
+        metadata = {
+            "image_metadata": image_metadata,
+            "exif_metadata": exif_metadata
+        }
+
+        return jsonify(metadata)
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Error downloading image: {str(e)}"}), 500
     except Exception as e:
-        logger.exception("Error extracting metadata")
-        return jsonify({"error": str(e)}), 500
-
+        return jsonify({"error": f"Error extracting metadata: {str(e)}"}), 500
+    
 
 if __name__ == "__main__":
     app.run(
