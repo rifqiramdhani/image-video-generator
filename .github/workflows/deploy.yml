@@ -1,0 +1,30 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main  # Trigger this action when you push to the 'main' branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest  # Run the job on the latest Ubuntu runner
+    
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v2  # Checkout the repository code
+    
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.5.3
+      with:
+        ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}  # Use the private key stored in secrets
+
+    - name: Deploy to EC2
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          cd /home/ec2-user/image-video-generator || exit 0  # Navigate to your app's directory
+          git pull origin main  # Pull the latest code from GitHub
+          docker build -t image-video-generator .  # Rebuild Docker image
+          docker stop image-video-generator-container || true  # Stop old container
+          docker rm image-video-generator-container || true  # Remove old container
+          docker run -d -p 5000:5000 --name image-video-generator-container image-video-generator  # Run the new container
+        EOF
