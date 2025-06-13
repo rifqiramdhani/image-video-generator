@@ -145,6 +145,32 @@ def generate_video():
         cleanup_files(image_path, audio_path, bgm_path, srt_path, output_path)
         return jsonify({"error": str(e)}), 500
 
+@app.route("/extract-metadata-image", methods=["GET"])
+def extract_metadata_image():
+    image_url = request.args.get("image_url")
+    if not image_url:
+        return jsonify({"error": "Missing image_url parameter"}), 400
+
+    try:
+        response = requests.get(image_url, timeout=30)
+        response.raise_for_status()
+        with open("/tmp/temp_image.jpg", "wb") as f:
+            f.write(response.content)
+
+        cmd = ["exiftool", "-j", "/tmp/temp_image.jpg"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError("exiftool failed")
+
+        metadata = result.stdout
+        cleanup_files("/tmp/temp_image.jpg")
+        return jsonify({"metadata": metadata})
+
+    except Exception as e:
+        logger.exception("Error extracting metadata")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
