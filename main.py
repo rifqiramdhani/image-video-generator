@@ -13,6 +13,7 @@ import subprocess
 from PIL import Image
 from PIL.ExifTags import TAGS
 from io import BytesIO
+import exifread
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -156,40 +157,28 @@ def extract_metadata_image():
         return jsonify({"error": "Missing image_url parameter"}), 400
 
     try:
-        # Download the image
+        # Step 1: Download the image
         response = requests.get(image_url, timeout=30)
         response.raise_for_status()  # Raise an exception for 4xx/5xx errors
 
-        # Open the image using PIL (Pillow)
-        img = Image.open(BytesIO(response.content))
+        # Step 2: Extract EXIF data from the image using ExifRead
+        image_file = BytesIO(response.content)
+        tags = exifread.process_file(image_file)
 
-        # Get basic metadata
-        image_metadata = {
-            "format": img.format,  # Image format (JPEG, PNG, etc.)
-            "mode": img.mode,      # Color space (RGB, L, etc.)
-            "size": img.size       # Image size (width, height)
-        }
-
-        # Extract EXIF data if available
-        exif_data = img._getexif()
+        # Step 3: Extract basic EXIF metadata (only if available)
         exif_metadata = {}
-
-        if exif_data:
-            for tag, value in exif_data.items():
-                tag_name = TAGS.get(tag, tag)
-                exif_metadata[tag_name] = value
         
-        # Combine basic metadata and EXIF data
-        metadata = {
-            "image_metadata": image_metadata,
-            "exif_metadata": exif_metadata
-        }
+        for tag in tags:
+            exif_metadata[tag] = tags[tag]
 
-        return jsonify(metadata)
+        # Step 4: Return the EXIF data as a JSON response
+        return jsonify({"exif_metadata": exif_metadata})
 
     except requests.exceptions.RequestException as e:
+        # Handle issues with downloading the image
         return jsonify({"error": f"Error downloading image: {str(e)}"}), 500
     except Exception as e:
+        # Catch any other errors, such as EXIF reading issues
         return jsonify({"error": f"Error extracting metadata: {str(e)}"}), 500
     
 
