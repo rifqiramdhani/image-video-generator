@@ -15,5 +15,3 @@ python-dotenv
 ffmpeg
 dotenv
 exiftool
-nano
-vim
