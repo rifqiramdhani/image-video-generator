@@ -130,6 +130,7 @@ def generate_video():
             f"-c:a aac -b:a 192k "
             f"-t '{total_audio}' '{output_path}'"
         )
+        print('Syntax CMD ===== ',cmd)
         logger.info("Running ffmpeg command")
         if os.system(cmd) != 0:
             raise RuntimeError("ffmpeg failed to")
