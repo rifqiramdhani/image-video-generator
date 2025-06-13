@@ -10,10 +10,9 @@ from dotenv import load_dotenv
 import re
 from datetime import timedelta
 import subprocess
-from PIL import Image
-from PIL.ExifTags import TAGS
-from io import BytesIO
-import exifread
+import json
+import urllib.request
+import urllib.error
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -154,32 +153,55 @@ def extract_metadata_image():
     image_url = request.args.get("image_url")
     
     if not image_url:
-        return jsonify({"error": "Missing image_url parameter"}), 400
+        return jsonify({"error": "Parameter 'image_url' tidak ditemukan"}), 400
+
+    # 1. Buat nama file sementara yang unik untuk menghindari konflik
+    # File akan disimpan di direktori temporary sistem, misal /tmp/ di Linux/macOS
+    temp_filename = f"{uuid.uuid4().hex}.jpg"
+    temp_image_path = os.path.join("/tmp", temp_filename)
 
     try:
-        # Step 1: Download the image
-        response = requests.get(image_url, timeout=30)
-        response.raise_for_status()  # Raise an exception for 4xx/5xx errors
+        # 2. Download gambar dari URL ke file sementara
+        # Menggunakan timeout 30 detik
+        with urllib.request.urlopen(image_url, timeout=30) as response, open(temp_image_path, "wb") as f_out:
+            f_out.write(response.read())
 
-        # Step 2: Extract EXIF data from the image using ExifRead
-        image_file = BytesIO(response.content)
-        tags = exifread.process_file(image_file)
-
-        # Step 3: Extract basic EXIF metadata (only if available)
-        exif_metadata = {}
+        # 3. Jalankan exiftool sebagai subprocess dengan argumen -j (untuk output JSON)
+        # Ini adalah bagian intinya
+        command = ['exiftool', '-j', temp_image_path]
         
-        for tag in tags:
-            exif_metadata[tag] = tags[tag]
+        # subprocess.run akan menjalankan perintah dan menunggu hingga selesai
+        # check=True akan melempar error jika exiftool gagal (misal file bukan gambar)
+        # capture_output=True akan menangkap output dari stdout dan stderr
+        result = subprocess.run(
+            command, 
+            capture_output=True, 
+            text=True, 
+            check=True
+        )
 
-        # Step 4: Return the EXIF data as a JSON response
-        return jsonify({"exif_metadata": exif_metadata})
+        # 4. Parse output JSON dari exiftool
+        # Exiftool -j membungkus outputnya dalam sebuah list, jadi kita ambil elemen pertama [0]
+        metadata = json.loads(result.stdout)[0]
+        
+        return jsonify(metadata)
 
-    except requests.exceptions.RequestException as e:
-        # Handle issues with downloading the image
-        return jsonify({"error": f"Error downloading image: {str(e)}"}), 500
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Gagal mendownload gambar: {e.reason}"}), 500
+    except FileNotFoundError:
+        # Error ini terjadi jika perintah 'exiftool' tidak ditemukan di sistem
+        return jsonify({"error": "Perintah 'exiftool' tidak ditemukan. Pastikan sudah terinstal dan ada di PATH sistem Anda."}), 500
+    except subprocess.CalledProcessError as e:
+        # Error ini terjadi jika exiftool berjalan tapi mengembalikan kode error
+        # (misalnya file yang didownload rusak atau bukan format gambar yang didukung)
+        return jsonify({"error": "Exiftool gagal memproses file.", "details": e.stderr}), 400
     except Exception as e:
-        # Catch any other errors, such as EXIF reading issues
-        return jsonify({"error": f"Error extracting metadata: {str(e)}"}), 500
+        # Menangkap error lainnya
+        return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
+    finally:
+        # 5. Pastikan file sementara selalu dihapus, baik berhasil maupun gagal
+        if os.path.exists(temp_image_path):
+            os.remove(temp_image_path)
     
 
 if __name__ == "__main__":
