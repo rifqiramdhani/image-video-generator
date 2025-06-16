@@ -163,8 +163,10 @@ def extract_metadata_image():
         with urllib.request.urlopen(image_url, timeout=30) as response, open(temp_image_path, "wb") as f_out:
             f_out.write(response.read())
 
-        # Gunakan mdls (macOS only) untuk ambil metadata
-        command = ['mdls', temp_image_path]
+        # Gunakan stat (Linux/Unix-like systems) untuk ambil metadata filesystem
+        # Kita gunakan format kustom untuk memparsing output dengan lebih mudah
+        # %w = time of file birth (creation), %Y = time of last data modification
+        command = ['stat', '-c', '%w|%Y', temp_image_path] # Use '|' as a delimiter
 
         result = subprocess.run(
             command,
@@ -173,24 +175,31 @@ def extract_metadata_image():
             check=True
         )
 
-        # Parse output mdls menjadi dictionary
+        # Parse output stat menjadi dictionary
+        # The output will be 'creation_date|modification_date'
+        stat_output_parts = result.stdout.strip().split("|")
+        
         metadata = {}
-        for line in result.stdout.strip().split("\n"):
-            if "=" in line:
-                key, value = line.split("=", 1)
-                metadata[key.strip()] = value.strip()
+        if len(stat_output_parts) == 2:
+            metadata["kMDItemFSCreationDate"] = stat_output_parts[0] # Birth/Creation time
+            metadata["kMDItemContentModificationDate"] = stat_output_parts[1] # Last Modified time
+        else:
+            # Fallback or error handling if stat output isn't as expected
+            metadata["stat_raw_output"] = result.stdout.strip()
+
 
         return jsonify(metadata)
 
     except urllib.error.URLError as e:
         return jsonify({"error": f"Gagal mendownload gambar: {e.reason}"}), 500
     except FileNotFoundError:
-        return jsonify({"error": "Perintah 'mdls' tidak ditemukan. Pastikan Anda menggunakan macOS."}), 500
+        return jsonify({"error": "Perintah 'stat' tidak ditemukan. Pastikan Anda menggunakan sistem berbasis Unix/Linux."}), 500
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": "mdls gagal memproses file.", "details": e.stderr}), 400
+        return jsonify({"error": "stat gagal memproses file.", "details": e.stderr}), 400
     except Exception as e:
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
     finally:
+        # Pastikan file temporary dihapus
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
 
