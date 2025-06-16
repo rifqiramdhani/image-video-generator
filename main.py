@@ -199,7 +199,7 @@ def extract_metadata_image():
     except Exception as e:
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
 
-@app.route("/extract-metadata-image", methods=["POST"]) # Ubah metode ke POST
+@app.route("/extract-metadata-image-post", methods=["POST"]) # Ubah metode ke POST
 def extract_metadata_image():
     # Pastikan ada file yang diunggah dalam request
     if 'image' not in request.files:
