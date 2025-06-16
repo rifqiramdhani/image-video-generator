@@ -155,54 +155,44 @@ def extract_metadata_image():
     if not image_url:
         return jsonify({"error": "Parameter 'image_url' tidak ditemukan"}), 400
 
-    # 1. Buat nama file sementara yang unik untuk menghindari konflik
-    # File akan disimpan di direktori temporary sistem, misal /tmp/ di Linux/macOS
     temp_filename = f"{uuid.uuid4().hex}.jpg"
     temp_image_path = os.path.join("/tmp", temp_filename)
 
     try:
-        # 2. Download gambar dari URL ke file sementara
-        # Menggunakan timeout 30 detik
+        # Download image
         with urllib.request.urlopen(image_url, timeout=30) as response, open(temp_image_path, "wb") as f_out:
             f_out.write(response.read())
 
-        # 3. Jalankan exiftool sebagai subprocess dengan argumen -j (untuk output JSON)
-        # Ini adalah bagian intinya
-        command = ['exiftool', '-j', temp_image_path]
-        
-        # subprocess.run akan menjalankan perintah dan menunggu hingga selesai
-        # check=True akan melempar error jika exiftool gagal (misal file bukan gambar)
-        # capture_output=True akan menangkap output dari stdout dan stderr
+        # Gunakan mdls (macOS only) untuk ambil metadata
+        command = ['mdls', temp_image_path]
+
         result = subprocess.run(
-            command, 
-            capture_output=True, 
-            text=True, 
+            command,
+            capture_output=True,
+            text=True,
             check=True
         )
 
-        # 4. Parse output JSON dari exiftool
-        # Exiftool -j membungkus outputnya dalam sebuah list, jadi kita ambil elemen pertama [0]
-        metadata = json.loads(result.stdout)[0]
-        
+        # Parse output mdls menjadi dictionary
+        metadata = {}
+        for line in result.stdout.strip().split("\n"):
+            if "=" in line:
+                key, value = line.split("=", 1)
+                metadata[key.strip()] = value.strip()
+
         return jsonify(metadata)
 
     except urllib.error.URLError as e:
         return jsonify({"error": f"Gagal mendownload gambar: {e.reason}"}), 500
     except FileNotFoundError:
-        # Error ini terjadi jika perintah 'exiftool' tidak ditemukan di sistem
-        return jsonify({"error": "Perintah 'exiftool' tidak ditemukan. Pastikan sudah terinstal dan ada di PATH sistem Anda."}), 500
+        return jsonify({"error": "Perintah 'mdls' tidak ditemukan. Pastikan Anda menggunakan macOS."}), 500
     except subprocess.CalledProcessError as e:
-        # Error ini terjadi jika exiftool berjalan tapi mengembalikan kode error
-        # (misalnya file yang didownload rusak atau bukan format gambar yang didukung)
-        return jsonify({"error": "Exiftool gagal memproses file.", "details": e.stderr}), 400
+        return jsonify({"error": "mdls gagal memproses file.", "details": e.stderr}), 400
     except Exception as e:
-        # Menangkap error lainnya
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
     finally:
-        # 5. Pastikan file sementara selalu dihapus, baik berhasil maupun gagal
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
-    
 
 if __name__ == "__main__":
     app.run(
