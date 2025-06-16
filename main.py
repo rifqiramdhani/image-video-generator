@@ -199,6 +199,76 @@ def extract_metadata_image():
     except Exception as e:
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
 
+@app.route("/extract-metadata-image", methods=["POST"]) # Ubah metode ke POST
+def extract_metadata_image():
+    # Pastikan ada file yang diunggah dalam request
+    if 'image' not in request.files:
+        return jsonify({"error": "Tidak ada file 'image' dalam request"}), 400
+
+    uploaded_file = request.files['image']
+
+    # Pastikan nama file tidak kosong
+    if uploaded_file.filename == '':
+        return jsonify({"error": "Nama file kosong"}), 400
+
+    # Buat nama file sementara yang unik
+    temp_filename = f"{uuid.uuid4().hex}_{uploaded_file.filename}"
+    temp_image_path = os.path.join("/tmp", temp_filename)
+
+    try:
+        # Simpan file yang diunggah ke lokasi sementara
+        uploaded_file.save(temp_image_path)
+
+        # Gunakan exiftool untuk mengambil semua metadata dalam format JSON
+        # '-j' atau '-json' untuk output JSON
+        # '-G' untuk menyertakan nama grup (EXIF, IPTC, File, dll.) di JSON
+        command = ['exiftool', '-json', '-G', temp_image_path]
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        # Parse output JSON dari exiftool
+        # exiftool -json akan menghasilkan array JSON, meskipun hanya ada satu file
+        metadata_list = json.loads(result.stdout.strip())
+        
+        # Ambil metadata dari elemen pertama (dan seharusnya satu-satunya) dalam list
+        if metadata_list:
+            extracted_metadata = metadata_list[0]
+        else:
+            extracted_metadata = {} # Jika tidak ada metadata yang ditemukan
+
+        # Karena yang dicari adalah "created at", kita bisa menambahkan logic untuk mencarinya:
+        # Prioritas: DateTimeOriginal, CreateDate, FileModificationDate/Time
+        created_at = None
+        if '[EXIF]DateTimeOriginal' in extracted_metadata:
+            created_at = extracted_metadata['[EXIF]DateTimeOriginal']
+        elif '[EXIF]CreateDate' in extracted_metadata:
+            created_at = extracted_metadata['[EXIF]CreateDate']
+        elif '[File]FileModificationDate/Time' in extracted_metadata:
+            created_at = extracted_metadata['[File]FileModificationDate/Time']
+        
+        if created_at:
+            extracted_metadata['DetectedCreatedAt'] = created_at
+
+        return jsonify(extracted_metadata)
+
+    except FileNotFoundError:
+        return jsonify({"error": "Perintah 'exiftool' tidak ditemukan. Pastikan sudah terinstal."}), 500
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "ExifTool gagal memproses file.", "details": e.stderr}), 400
+    except json.JSONDecodeError:
+        return jsonify({"error": "Gagal parsing output JSON dari ExifTool.", "raw_output": result.stdout.strip()}), 500
+    except Exception as e:
+        return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
+    finally:
+        # Pastikan file temporary dihapus, terlepas dari sukses atau gagal
+        if os.path.exists(temp_image_path):
+            os.remove(temp_image_path)
+
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
