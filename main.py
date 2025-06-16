@@ -198,10 +198,6 @@ def extract_metadata_image():
         return jsonify({"error": "stat gagal memproses file.", "details": e.stderr}), 400
     except Exception as e:
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
-    finally:
-        # Pastikan file temporary dihapus
-        if os.path.exists(temp_image_path):
-            os.remove(temp_image_path)
 
 if __name__ == "__main__":
     app.run(
