@@ -264,10 +264,6 @@ def extract_metadata_image_post():
         return jsonify({"error": "Gagal parsing output JSON dari ExifTool.", "raw_output": result.stdout.strip()}), 500
     except Exception as e:
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
-    finally:
-        # Pastikan file temporary dihapus, terlepas dari sukses atau gagal
-        if os.path.exists(temp_image_path):
-            os.remove(temp_image_path)
 
 if __name__ == "__main__":
     app.run(
