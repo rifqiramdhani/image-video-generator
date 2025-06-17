@@ -181,7 +181,7 @@ def extract_metadata_image():
         # Parse output dari identify -verbose
         # Output ini sangat verbose, jadi kita perlu memparsingnya
         # menjadi struktur data yang lebih terorganisir
-        metadata = parse_imagemagick_verbose_output(result.stdout)
+        metadata = parse_imagemagick_verbose_output_unfiltered(result.stdout)
 
         return jsonify(metadata)
 
@@ -198,81 +198,169 @@ def extract_metadata_image():
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
 
 
-
-def parse_imagemagick_verbose_output(output_string):
+def parse_imagemagick_verbose_output_unfiltered(output_string):
     """
-    Parses the verbose output of ImageMagick's identify command into a dictionary.
-    This is a simplified parser and might need adjustments based on the exact
-    metadata you wish to extract and its variability.
+    Parses the verbose output of ImageMagick's identify command into a dictionary,
+    attempting to capture all information, including nested sections like statistics.
     """
     metadata = {}
-    current_section = None
+    current_main_section = None
+    current_sub_section = None
+    current_sub_sub_section = None # For deeply nested parts like Red:, Green:, Blue:
 
-    for line in output_string.splitlines():
-        line = line.strip()
+    lines = output_string.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
 
-        # Check for main sections (e.g., "Image:", "Properties:", "EXIF:")
-        if line.startswith("Image:"):
-            current_section = "Image"
-            metadata["Image"] = {}
-        elif line.startswith("Properties:"):
-            current_section = "Properties"
-            metadata["Properties"] = {}
-        elif line.startswith("EXIF:"):
-            current_section = "EXIF"
-            metadata["EXIF"] = {}
-        elif line.startswith("IPTC:"):
-            current_section = "IPTC"
-            metadata["IPTC"] = {}
-        elif line.startswith("Channel statistics:"):
-            current_section = "Channel statistics"
-            metadata["Channel statistics"] = {}
-        # Add more sections as needed (e.g., "ICC profile:", "Profile-xmp:")
+        # Skip empty lines
+        if not line:
+            i += 1
+            continue
 
-        # Parse key-value pairs within sections
-        if current_section and ":" in line and not line.startswith(" "): # Avoid sub-sections with leading spaces
-            key_value = line.split(":", 1) # Split only on the first colon
-            key = key_value[0].strip()
-            value = key_value[1].strip()
-            if current_section == "Image" and key in ["Format", "Geometry", "Mime type", "Colorspace", "Depth", "Resolution"]:
-                metadata[current_section][key] = value
-            elif current_section in ["Properties", "EXIF", "IPTC"] and key:
-                metadata[current_section][key] = value
-            # Handle special cases like Resolution which might have "x"
-            if key == "Resolution":
-                try:
-                    res_parts = value.split("x")
-                    if len(res_parts) == 2:
-                        metadata[current_section]["ResolutionX"] = res_parts[0]
-                        metadata[current_section]["ResolutionY"] = res_parts[1]
-                except:
-                    pass # Ignore if parsing fails
+        # Check for main sections (e.g., "Image:", "Properties:", "EXIF:", "Channel statistics:")
+        if line.endswith(":"):
+            # A main section or a top-level subsection (like "Image statistics:")
+            section_name = line[:-1].strip() # Remove trailing colon
 
-    # Flatten some common top-level metadata for easier access if desired
-    # For example, to get direct access to width, height, format
-    if "Image" in metadata:
-        if "Geometry" in metadata["Image"]:
-            geo = metadata["Image"]["Geometry"].split('+')[0] # Remove potential +0+0
-            metadata["width"], metadata["height"] = geo.split('x')
-        if "Format" in metadata["Image"]:
-            metadata["format"] = metadata["Image"]["Format"]
-        if "Mime type" in metadata["Image"]:
-            metadata["mime_type"] = metadata["Image"]["Mime type"]
-        if "Colorspace" in metadata["Image"]:
-            metadata["colorspace"] = metadata["Image"]["Colorspace"]
-        if "Depth" in metadata["Image"]:
-            metadata["depth"] = metadata["Image"]["Depth"]
+            if section_name == "Image":
+                current_main_section = "Image"
+                metadata["Image"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            elif section_name == "Properties":
+                current_main_section = "Properties"
+                metadata["Properties"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            elif section_name == "EXIF":
+                current_main_section = "EXIF"
+                metadata["EXIF"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            elif section_name == "IPTC":
+                current_main_section = "IPTC"
+                metadata["IPTC"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            elif section_name == "Channel statistics":
+                current_main_section = "Channel statistics"
+                metadata["Channel statistics"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            elif section_name == "Image statistics":
+                current_main_section = "Image statistics"
+                metadata["Image statistics"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            elif section_name == "Chromaticity":
+                current_main_section = "Chromaticity"
+                metadata["Chromaticity"] = {}
+                current_sub_section = None
+                current_sub_sub_section = None
+            # Add other main sections here as they appear (e.g., "ICC profile:", "Profile-xmp:")
+            else:
+                # This might be a subsection within a main section, or a new unhandled section
+                # Try to add it to the current_main_section if exists, or as a new top-level
+                if current_main_section and section_name not in ["Channel depth"]: # Channel depth is handled below
+                    if current_main_section not in metadata:
+                        metadata[current_main_section] = {}
+                    metadata[current_main_section][section_name] = {}
+                    current_sub_section = section_name
+                    current_sub_sub_section = None
+                else:
+                    # If it's a completely new section not yet classified
+                    metadata[section_name] = {}
+                    current_main_section = section_name
+                    current_sub_section = None
+                    current_sub_sub_section = None
+        
+        # Check for Channel depth: (special handling due to direct key-value pairs)
+        elif "Channel depth:" in line:
+            key_value = line.split(":", 1)
+            if len(key_value) == 2 and current_main_section == "Image":
+                metadata["Image"]["Channel depth"] = {}
+                current_sub_section = "Channel depth"
+                current_sub_sub_section = None # Reset sub-sub-section
 
-    # Add example of specific EXIF extraction
-    if "EXIF" in metadata:
-        if "DateTimeOriginal" in metadata["EXIF"]:
-            metadata["creation_date_from_exif"] = metadata["EXIF"]["DateTimeOriginal"]
-        if "Make" in metadata["EXIF"]:
-            metadata["camera_make"] = metadata["EXIF"]["Make"]
-        if "Model" in metadata["EXIF"]:
-            metadata["camera_model"] = metadata["EXIF"]["Model"]
+        # Process key-value pairs
+        elif ":" in line:
+            parts = line.split(":", 1)
+            key = parts[0].strip()
+            value = parts[1].strip()
+
+            if current_main_section == "Image":
+                if current_sub_section == "Channel depth":
+                    metadata["Image"]["Channel depth"][key] = value
+                elif current_main_section == "Image" and current_sub_section is None:
+                    # Direct Image properties
+                    metadata["Image"][key] = value
+            elif current_main_section in ["Properties", "EXIF", "IPTC", "Artifacts"]:
+                if current_main_section not in metadata:
+                    metadata[current_main_section] = {} # Safety check
+                metadata[current_main_section][key] = value
+            elif current_main_section == "Chromaticity":
+                if current_main_section not in metadata:
+                    metadata[current_main_section] = {} # Safety check
+                metadata[current_main_section][key] = value
+            elif current_main_section in ["Channel statistics", "Image statistics"]:
+                # Handle nested statistics: Overall:, Red:, Green:, Blue:
+                if key in ["Pixels", "Red", "Green", "Blue", "Overall"]: # These are subsections within statistics
+                    if current_main_section not in metadata:
+                        metadata[current_main_section] = {} # Safety check
+                    metadata[current_main_section][key] = {}
+                    current_sub_sub_section = key # Set this as the active sub-sub-section
+                    # If it's a key like "Pixels", it's a direct value, not a subsection
+                    if key == "Pixels":
+                        metadata[current_main_section][key] = value
+                        current_sub_sub_section = None # Reset if it's a direct value
+                elif current_sub_sub_section:
+                    # Properties within a statistics channel (min, max, mean, etc.)
+                    if current_main_section not in metadata:
+                        metadata[current_main_section] = {} # Safety check
+                    if current_sub_sub_section not in metadata[current_main_section]:
+                        metadata[current_main_section][current_sub_sub_section] = {} # Safety check
+                    metadata[current_main_section][current_sub_sub_section][key] = value
+                else:
+                    # Fallback for unexpected direct keys in statistics section
+                    if current_main_section not in metadata:
+                        metadata[current_main_section] = {} # Safety check
+                    metadata[current_main_section][key] = value
+            else:
+                # Top-level properties (like Filesize, Number pixels, User time, Version)
+                # These are usually at the very end and don't belong to a preceding section.
+                # Only add if it's not part of another recognized structure.
+                if current_main_section not in metadata and not any(line.startswith(s + ":") for s in ["Image", "Properties", "EXIF", "IPTC", "Channel statistics", "Image statistics", "Chromaticity", "Artifacts"]):
+                    metadata[key] = value
+
+        i += 1 # Move to the next line
+
+    # Post-processing for fields like Geometry, Filesize etc. if needed
+    # You can add specific parsing for 'Geometry', 'Filesize', 'Version' etc.
+    # to convert them to more usable types (e.g., int, float) if they are string.
+    # For example:
+    if 'Image' in metadata and 'Geometry' in metadata['Image']:
+        try:
+            geom_parts = metadata['Image']['Geometry'].split('+')[0].split('x')
+            metadata['Image']['width'] = int(geom_parts[0])
+            metadata['Image']['height'] = int(geom_parts[1])
+        except (ValueError, IndexError):
+            pass # Keep as string if parsing fails
+    
+    if 'Filesize' in metadata:
+        try:
+            # Remove 'B' or 'KB' or 'MB' and convert to int/float
+            size_str = metadata['Filesize'].replace('B', '').replace('K', '*1024').replace('M', '*1024*1024')
+            if '*' in size_str:
+                metadata['Filesize_bytes'] = eval(size_str) # Use eval for basic calculations like 164674B
+            else:
+                metadata['Filesize_bytes'] = int(size_str)
+        except Exception:
+            pass # Keep original string if parsing fails
+
 
     return metadata
+
 
 if __name__ == "__main__":
     app.run(
