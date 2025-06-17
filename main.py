@@ -151,11 +151,14 @@ def generate_video():
 @app.route("/extract-metadata-image", methods=["GET"])
 def extract_metadata_image():
     image_url = request.args.get("image_url")
-    
+
     if not image_url:
         return jsonify({"error": "Parameter 'image_url' tidak ditemukan"}), 400
 
-    temp_filename = f"{uuid.uuid4().hex}.jpg"
+    # Gunakan ekstensi file asli jika memungkinkan, atau default ke .tmp
+    # Ini membantu identify dalam mendeteksi format yang benar
+    file_extension = os.path.splitext(image_url)[1] if os.path.splitext(image_url)[1] else ".tmp"
+    temp_filename = f"{uuid.uuid4().hex}{file_extension}"
     temp_image_path = os.path.join("/tmp", temp_filename)
 
     try:
@@ -163,10 +166,10 @@ def extract_metadata_image():
         with urllib.request.urlopen(image_url, timeout=30) as response, open(temp_image_path, "wb") as f_out:
             f_out.write(response.read())
 
-        # Gunakan stat (Linux/Unix-like systems) untuk ambil metadata filesystem
-        # Kita gunakan format kustom untuk memparsing output dengan lebih mudah
-        # %w = time of file birth (creation), %Y = time of last data modification
-        command = ['stat', '-c', '%w|%Y', temp_image_path] # Use '|' as a delimiter
+        # Gunakan 'magick identify -verbose' untuk mendapatkan metadata gambar
+        # 'magick' adalah perintah standar untuk ImageMagick 7+
+        # Jika Anda menggunakan ImageMagick 6, mungkin hanya 'identify'
+        command = ['identify', '-verbose', temp_image_path]
 
         result = subprocess.run(
             command,
@@ -175,95 +178,104 @@ def extract_metadata_image():
             check=True
         )
 
-        # Parse output stat menjadi dictionary
-        # The output will be 'creation_date|modification_date'
-        stat_output_parts = result.stdout.strip().split("|")
-        
-        metadata = {}
-        if len(stat_output_parts) == 2:
-            metadata["kMDItemFSCreationDate"] = stat_output_parts[0] # Birth/Creation time
-            metadata["kMDItemContentModificationDate"] = stat_output_parts[1] # Last Modified time
-        else:
-            # Fallback or error handling if stat output isn't as expected
-            metadata["stat_raw_output"] = result.stdout.strip()
-
+        # Parse output dari identify -verbose
+        # Output ini sangat verbose, jadi kita perlu memparsingnya
+        # menjadi struktur data yang lebih terorganisir
+        metadata = parse_imagemagick_verbose_output(result.stdout)
 
         return jsonify(metadata)
 
     except urllib.error.URLError as e:
-        return jsonify({"error": f"Gagal mendownload gambar: {e.reason}"}), 500
+        return jsonify({"error": f"Gagal mengunduh gambar: {e.reason}"}), 500
     except FileNotFoundError:
-        return jsonify({"error": "Perintah 'stat' tidak ditemukan. Pastikan Anda menggunakan sistem berbasis Unix/Linux."}), 500
+        # Menangkap error jika 'magick' atau 'identify' tidak ditemukan
+        return jsonify({"error": "Perintah 'magick' (ImageMagick) tidak ditemukan. Pastikan ImageMagick terinstal dan berada di PATH."}), 500
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": "stat gagal memproses file.", "details": e.stderr}), 400
+        # Menangkap error jika identify gagal memproses file gambar (misal: file rusak)
+        return jsonify({"error": "ImageMagick 'identify' gagal memproses file gambar.", "details": e.stderr.strip()}), 400
     except Exception as e:
+        # Tangani kesalahan umum lainnya
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
+    finally:
+        # Pastikan file temporary dihapus, bahkan jika ada kesalahan
+        if os.path.exists(temp_image_path):
+            os.remove(temp_image_path)
 
-@app.route("/extract-metadata-image-post", methods=["POST"]) # Ubah metode ke POST
-def extract_metadata_image_post():
-    # Pastikan ada file yang diunggah dalam request
-    if 'image' not in request.files:
-        return jsonify({"error": "Tidak ada file 'image' dalam request"}), 400
 
-    uploaded_file = request.files['image']
+def parse_imagemagick_verbose_output(output_string):
+    """
+    Parses the verbose output of ImageMagick's identify command into a dictionary.
+    This is a simplified parser and might need adjustments based on the exact
+    metadata you wish to extract and its variability.
+    """
+    metadata = {}
+    current_section = None
 
-    # Pastikan nama file tidak kosong
-    if uploaded_file.filename == '':
-        return jsonify({"error": "Nama file kosong"}), 400
+    for line in output_string.splitlines():
+        line = line.strip()
 
-    # Buat nama file sementara yang unik
-    temp_filename = f"{uuid.uuid4().hex}_{uploaded_file.filename}"
-    temp_image_path = os.path.join("/tmp", temp_filename)
+        # Check for main sections (e.g., "Image:", "Properties:", "EXIF:")
+        if line.startswith("Image:"):
+            current_section = "Image"
+            metadata["Image"] = {}
+        elif line.startswith("Properties:"):
+            current_section = "Properties"
+            metadata["Properties"] = {}
+        elif line.startswith("EXIF:"):
+            current_section = "EXIF"
+            metadata["EXIF"] = {}
+        elif line.startswith("IPTC:"):
+            current_section = "IPTC"
+            metadata["IPTC"] = {}
+        elif line.startswith("Channel statistics:"):
+            current_section = "Channel statistics"
+            metadata["Channel statistics"] = {}
+        # Add more sections as needed (e.g., "ICC profile:", "Profile-xmp:")
 
-    try:
-        # Simpan file yang diunggah ke lokasi sementara
-        uploaded_file.save(temp_image_path)
+        # Parse key-value pairs within sections
+        if current_section and ":" in line and not line.startswith(" "): # Avoid sub-sections with leading spaces
+            key_value = line.split(":", 1) # Split only on the first colon
+            key = key_value[0].strip()
+            value = key_value[1].strip()
+            if current_section == "Image" and key in ["Format", "Geometry", "Mime type", "Colorspace", "Depth", "Resolution"]:
+                metadata[current_section][key] = value
+            elif current_section in ["Properties", "EXIF", "IPTC"] and key:
+                metadata[current_section][key] = value
+            # Handle special cases like Resolution which might have "x"
+            if key == "Resolution":
+                try:
+                    res_parts = value.split("x")
+                    if len(res_parts) == 2:
+                        metadata[current_section]["ResolutionX"] = res_parts[0]
+                        metadata[current_section]["ResolutionY"] = res_parts[1]
+                except:
+                    pass # Ignore if parsing fails
 
-        # Gunakan exiftool untuk mengambil semua metadata dalam format JSON
-        # '-j' atau '-json' untuk output JSON
-        # '-G' untuk menyertakan nama grup (EXIF, IPTC, File, dll.) di JSON
-        command = ['exiftool', '-json', '-G', temp_image_path]
+    # Flatten some common top-level metadata for easier access if desired
+    # For example, to get direct access to width, height, format
+    if "Image" in metadata:
+        if "Geometry" in metadata["Image"]:
+            geo = metadata["Image"]["Geometry"].split('+')[0] # Remove potential +0+0
+            metadata["width"], metadata["height"] = geo.split('x')
+        if "Format" in metadata["Image"]:
+            metadata["format"] = metadata["Image"]["Format"]
+        if "Mime type" in metadata["Image"]:
+            metadata["mime_type"] = metadata["Image"]["Mime type"]
+        if "Colorspace" in metadata["Image"]:
+            metadata["colorspace"] = metadata["Image"]["Colorspace"]
+        if "Depth" in metadata["Image"]:
+            metadata["depth"] = metadata["Image"]["Depth"]
 
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=True
-        )
+    # Add example of specific EXIF extraction
+    if "EXIF" in metadata:
+        if "DateTimeOriginal" in metadata["EXIF"]:
+            metadata["creation_date_from_exif"] = metadata["EXIF"]["DateTimeOriginal"]
+        if "Make" in metadata["EXIF"]:
+            metadata["camera_make"] = metadata["EXIF"]["Make"]
+        if "Model" in metadata["EXIF"]:
+            metadata["camera_model"] = metadata["EXIF"]["Model"]
 
-        # Parse output JSON dari exiftool
-        # exiftool -json akan menghasilkan array JSON, meskipun hanya ada satu file
-        metadata_list = json.loads(result.stdout.strip())
-        
-        # Ambil metadata dari elemen pertama (dan seharusnya satu-satunya) dalam list
-        if metadata_list:
-            extracted_metadata = metadata_list[0]
-        else:
-            extracted_metadata = {} # Jika tidak ada metadata yang ditemukan
-
-        # Karena yang dicari adalah "created at", kita bisa menambahkan logic untuk mencarinya:
-        # Prioritas: DateTimeOriginal, CreateDate, FileModificationDate/Time
-        created_at = None
-        if '[EXIF]DateTimeOriginal' in extracted_metadata:
-            created_at = extracted_metadata['[EXIF]DateTimeOriginal']
-        elif '[EXIF]CreateDate' in extracted_metadata:
-            created_at = extracted_metadata['[EXIF]CreateDate']
-        elif '[File]FileModificationDate/Time' in extracted_metadata:
-            created_at = extracted_metadata['[File]FileModificationDate/Time']
-        
-        if created_at:
-            extracted_metadata['DetectedCreatedAt'] = created_at
-
-        return jsonify(extracted_metadata)
-
-    except FileNotFoundError:
-        return jsonify({"error": "Perintah 'exiftool' tidak ditemukan. Pastikan sudah terinstal."}), 500
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": "ExifTool gagal memproses file.", "details": e.stderr}), 400
-    except json.JSONDecodeError:
-        return jsonify({"error": "Gagal parsing output JSON dari ExifTool.", "raw_output": result.stdout.strip()}), 500
-    except Exception as e:
-        return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
+    return metadata
 
 if __name__ == "__main__":
     app.run(
