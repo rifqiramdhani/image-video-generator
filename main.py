@@ -196,10 +196,7 @@ def extract_metadata_image():
     except Exception as e:
         # Tangani kesalahan umum lainnya
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
-    finally:
-        # Pastikan file temporary dihapus, bahkan jika ada kesalahan
-        if os.path.exists(temp_image_path):
-            os.remove(temp_image_path)
+
 
 
 def parse_imagemagick_verbose_output(output_string):
