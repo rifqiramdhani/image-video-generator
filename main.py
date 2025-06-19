@@ -13,6 +13,8 @@ import subprocess
 import json
 import urllib.request
 import urllib.error
+import io
+from tempfile import NamedTemporaryFile
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -198,6 +200,50 @@ def extract_metadata_image():
         # Tangani kesalahan umum lainnya
         return jsonify({"error": f"Terjadi kesalahan tak terduga: {str(e)}"}), 500
 
+@app.route("/merge-audio-video", methods=["POST"])
+def merge():
+    audio = request.files["audio"].read()
+    video = request.files["video"].read()
+    merged = merge_audio_video_ffmpeg(audio, video)
+    return send_file(
+        merged,
+        mimetype="video/mp4",
+        as_attachment=True,
+        download_name="merged.mp4"
+    )
+
+def merge_audio_video_ffmpeg(audio_binary, video_binary):
+    # Save audio to temp file
+    with NamedTemporaryFile(delete=False, suffix=".mp3") as audio_file:
+        audio_file.write(audio_binary)
+        audio_path = audio_file.name
+
+    # Save video to temp file
+    with NamedTemporaryFile(delete=False, suffix=".mp4") as video_file:
+        video_file.write(video_binary)
+        video_path = video_file.name
+
+    # Output temp file
+    with NamedTemporaryFile(delete=False, suffix=".mp4") as output_file:
+        output_path = output_file.name
+
+    # Run FFmpeg command
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-strict", "experimental",
+        output_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Read merged file into BytesIO
+    with open(output_path, "rb") as f:
+        merged_binary = f.read()
+
+    return io.BytesIO(merged_binary)
 
 if __name__ == "__main__":
     app.run(
