@@ -205,12 +205,8 @@ def merge():
     audio = request.files["audio"].read()
     video = request.files["video"].read()
     merged = merge_audio_video_ffmpeg(audio, video)
-    return send_file(
-        merged,
-        mimetype="video/mp4",
-        as_attachment=True,
-        download_name="merged.mp4"
-    )
+
+    return send_file(merged, mimetype="video/mp4", as_attachment=True, attachment_filename="output.mp4")
 
 def merge_audio_video_ffmpeg(audio_binary, video_binary):
     # Save audio to temp file
