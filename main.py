@@ -209,37 +209,45 @@ def merge():
     return send_file(merged, mimetype="video/mp4", as_attachment=True, attachment_filename="output.mp4")
 
 def merge_audio_video_ffmpeg(audio_binary, video_binary):
-    # Save audio to temp file
-    with NamedTemporaryFile(delete=False, suffix=".mp3") as audio_file:
-        audio_file.write(audio_binary)
-        audio_path = audio_file.name
+    audio_path = video_path = output_path = None
 
-    # Save video to temp file
-    with NamedTemporaryFile(delete=False, suffix=".mp4") as video_file:
-        video_file.write(video_binary)
-        video_path = video_file.name
+    try:
+        # Save audio to temp file
+        with NamedTemporaryFile(delete=False, suffix=".mp3") as audio_file:
+            audio_file.write(audio_binary)
+            audio_path = audio_file.name
 
-    # Output temp file
-    with NamedTemporaryFile(delete=False, suffix=".mp4") as output_file:
-        output_path = output_file.name
+        # Save video to temp file
+        with NamedTemporaryFile(delete=False, suffix=".mp4") as video_file:
+            video_file.write(video_binary)
+            video_path = video_file.name
 
-    # Run FFmpeg command
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-i", audio_path,
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-strict", "experimental",
-        output_path
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Output temp file
+        with NamedTemporaryFile(delete=False, suffix=".mp4") as output_file:
+            output_path = output_file.name
 
-    # Read merged file into BytesIO
-    with open(output_path, "rb") as f:
-        merged_binary = f.read()
+        # Run FFmpeg command
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-map", "0:v:0",   # gunakan video dari input 0
+            "-map", "1:a:0",   # gunakan audio dari input 1
+            "-c:v", "copy",    # copy video tanpa re-encoding
+            "-c:a", "aac",     # encode audio ke AAC
+            "-shortest",       # potong jika audio lebih panjang dari video
+            output_path
+        ]
 
-    return io.BytesIO(merged_binary)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg failed: {result.stderr.decode()}")
+
+        with open(output_path, "rb") as f:
+            return io.BytesIO(f.read())
+    finally:
+        cleanup_files(audio_path, video_path, output_path)
 
 if __name__ == "__main__":
     app.run(
