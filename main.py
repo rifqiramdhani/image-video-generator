@@ -15,6 +15,7 @@ import urllib.request
 import urllib.error
 import io
 from tempfile import NamedTemporaryFile
+from datetime import datetime
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -205,8 +206,8 @@ def merge():
     audio = request.files["audio"].read()
     video = request.files["video"].read()
     merged = merge_audio_video_ffmpeg(audio, video)
-
-    return send_file(merged, mimetype="video/mp4", as_attachment=True, attachment_filename="output.mp4")
+    filename = f"merged-video-{datetime.now().strftime('%Y%m%d-%H%M%S')}.mp4"
+    return send_file(merged, mimetype="video/mp4", as_attachment=True, attachment_filename=filename)
 
 def merge_audio_video_ffmpeg(audio_binary, video_binary):
     audio_path = video_path = output_path = None
